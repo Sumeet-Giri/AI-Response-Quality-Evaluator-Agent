@@ -1,0 +1,8 @@
+Milestone 1 details are as follows:
+
+Milestone 1 (30 June - 9 July)
+
+1. Study LLM evaluation techniques, hallucination detection methods, RAG architecture, and existing evaluation frameworks like RAGAS and TruLens.
+2. Design system architecture, agent responsibilities, scoring dimensions, orchestration flow, and data models.
+3. Develop Evaluation Input Module — single submission interface accepting question, AI response, and optional reference answer or source document.
+4. Build Reference Knowledge Base — seed with public QA benchmark datasets (TruthfulQA, SQuAD from Hugging Face), implement chunking, embedding, and vector store indexing for RAG-grounded evaluation.
