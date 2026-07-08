@@ -1,4 +1,6 @@
-from fastapi import FastAPI  # type: ignore[import]
+from fastapi import FastAPI
+
+from app.api.routes import router
 
 app = FastAPI(
     title="AI Response Quality Evaluator",
@@ -12,3 +14,6 @@ def home():
     return {
         "message": "AI Response Quality Evaluator API is running."
     }
+
+
+app.include_router(router)
