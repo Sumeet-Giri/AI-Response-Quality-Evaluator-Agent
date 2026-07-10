@@ -1,10 +1,23 @@
-from datasets import load_dataset
+from app.services.dataset_loader import load_datasets
 
-dataset = load_dataset(
-    "truthfulqa/truthful_qa",
-    "generation"
+data = load_datasets(
+    truthfulqa_limit=2,
+    squad_limit=2
 )
 
-record = dataset["validation"][0]
+print("=" * 60)
+print(f"Total Records : {len(data)}")
+print("=" * 60)
 
-print(record)
+for i, record in enumerate(data, start=1):
+    print(f"\nRecord {i}")
+    print("-" * 40)
+
+    print("Dataset :", record["dataset"])
+    print("Question:", record["question"])
+    print("Answer  :", record["answer"])
+
+    if record["context"]:
+        print("Context :", record["context"][:100], "...")
+
+    print("Source  :", record["source"])
