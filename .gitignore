@@ -216,3 +216,5 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+/backend/chroma_db
+/backend/chroma_db/5c6a4d07-e988-45fc-9954-3509fc909155
