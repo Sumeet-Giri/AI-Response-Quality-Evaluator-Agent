@@ -1,13 +1,9 @@
-from typing import List
+from pydantic import BaseModel
 
-class AccuracyResult:
 
-    score: float
-
-    reasoning: str
-
+class AccuracyResult(BaseModel):
+    score: int
     semantic_similarity: float
-
     factually_correct: bool
-
-    evidence: List[str]
+    evidence: list[str]
+    reasoning: str

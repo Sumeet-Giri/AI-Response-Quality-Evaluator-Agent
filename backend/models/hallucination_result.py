@@ -1,13 +1,8 @@
-from typing import List
+from pydantic import BaseModel
 
-class HallucinationResult:
 
-    score: float
-
+class HallucinationResult(BaseModel):
+    hallucination_score: int
+    supported_claims: list[str]
+    hallucinated_claims: list[str]
     reasoning: str
-
-    supported_claims: List[str]
-
-    hallucinated_claims: List[str]
-
-    supported_percentage: float
