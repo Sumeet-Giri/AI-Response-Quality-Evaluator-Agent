@@ -2,121 +2,100 @@ from agents.relevance_agent import RelevanceJudgeAgent
 from agents.accuracy_agent import AccuracyJudgeAgent
 from agents.hallucination_agent import HallucinationDetectionAgent
 
+from validation.benchmark_cases import (
+    RELEVANCE_TEST_CASES,
+    ACCURACY_TEST_CASES,
+    HALLUCINATION_TEST_CASES
+)
+
 
 class BenchmarkValidator:
 
-    def __init__(self):
-        self.relevance_agent = RelevanceJudgeAgent()
-        self.accuracy_agent = AccuracyJudgeAgent()
-        self.hallucination_agent = HallucinationDetectionAgent()
+    # ----------------------------------
+    # RELEVANCE VALIDATION
+    # ----------------------------------
 
     def validate_relevance_agent(self):
 
-        print("\n" + "=" * 60)
-        print("RELEVANCE AGENT VALIDATION")
-        print("=" * 60)
+        agent = RelevanceJudgeAgent()
+        results = []
 
-        test_cases = [
+        for case in RELEVANCE_TEST_CASES:
 
-            {
-                "question": "What is the capital of France?",
-                "response": "The capital of France is Paris."
-            },
-
-            {
-                "question": "What is Machine Learning?",
-                "response": "I like watching cricket on weekends."
-            },
-
-            {
-                "question": "Explain the water cycle.",
-                "response": "Water evaporates from the Earth's surface."
-            }
-
-        ]
-
-        for i, test in enumerate(test_cases, start=1):
-
-            result = self.relevance_agent.evaluate(
-                test["question"],
-                test["response"]
+            result = agent.evaluate(
+                case["question"],
+                case["response"]
             )
 
-            print(f"\nTest Case {i}")
-            print(result)
+            results.append({
+                "question": case["question"],
+                "response": case["response"],
+                "result": result.model_dump()
+            })
+
+        return results
+
+    # ----------------------------------
+    # ACCURACY VALIDATION
+    # ----------------------------------
 
     def validate_accuracy_agent(self):
 
-        print("\n" + "=" * 60)
-        print("ACCURACY AGENT VALIDATION")
-        print("=" * 60)
+        agent = AccuracyJudgeAgent()
+        results = []
 
-        test_cases = [
+        for case in ACCURACY_TEST_CASES:
 
-            {
-                "response": "The capital of France is Paris.",
-                "reference": "Paris is the capital of France."
-            },
-
-            {
-                "response": "HTTP is used for communication on the web.",
-                "reference": "HTTP is a protocol used for communication on the web."
-            },
-
-            {
-                "response": "Machine Learning is a subset of AI.",
-                "reference": "Machine Learning is a subset of Artificial Intelligence."
-            }
-
-        ]
-
-        for i, test in enumerate(test_cases, start=1):
-
-            result = self.accuracy_agent.evaluate(
-                test["response"],
-                test["reference"]
+            result = agent.evaluate(
+                case["response"],
+                case["reference_answer"]
             )
 
-            print(f"\nTest Case {i}")
-            print(result)
+            results.append({
+                "response": case["response"],
+                "reference_answer": case["reference_answer"],
+                "result": result.model_dump()
+            })
+
+        return results
+
+    # ----------------------------------
+    # HALLUCINATION VALIDATION
+    # ----------------------------------
 
     def validate_hallucination_agent(self):
 
-        print("\n" + "=" * 60)
-        print("HALLUCINATION AGENT VALIDATION")
-        print("=" * 60)
+        agent = HallucinationDetectionAgent()
+        results = []
 
-        test_cases = [
+        for case in HALLUCINATION_TEST_CASES:
 
-            {
-                "response": "Paris is the capital of France.",
-                "reference": "Paris is the capital of France."
-            },
-
-            {
-                "response": "Paris is the capital of France. It is located in Germany.",
-                "reference": "Paris is the capital of France."
-            },
-
-            {
-                "response": "Python was created by Guido van Rossum. It won a Nobel Prize.",
-                "reference": "Python was created by Guido van Rossum."
-            }
-
-        ]
-
-        for i, test in enumerate(test_cases, start=1):
-
-            result = self.hallucination_agent.evaluate(
-                test["response"],
-                test["reference"]
+            result = agent.evaluate(
+                case["response"],
+                case["reference_answer"]
             )
 
-            print(f"\nTest Case {i}")
-            print(result)
+            results.append({
+                "response": case["response"],
+                "reference_answer": case["reference_answer"],
+                "result": result.model_dump()
+            })
+
+        return results
+
+    # ----------------------------------
+    # VALIDATE ALL
+    # ----------------------------------
 
     def validate_all(self):
 
-        self.validate_relevance_agent()
-        self.validate_accuracy_agent()
-        self.validate_hallucination_agent()
+        return {
+            "relevance_validation":
+            self.validate_relevance_agent(),
+
+            "accuracy_validation":
+            self.validate_accuracy_agent(),
+
+            "hallucination_validation":
+            self.validate_hallucination_agent()
+        }

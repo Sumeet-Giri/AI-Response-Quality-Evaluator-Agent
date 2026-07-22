@@ -1,19 +1,23 @@
 from fastapi import FastAPI
 
-from app.api.routes import router
+from app.api import evaluate
+from app.api import validation
+
 
 app = FastAPI(
-    title="AI Response Quality Evaluator",
-    version="1.0.0",
-    description="Milestone 1 Prototype"
+    title="AI Response Quality Evaluator Agent"
 )
 
 
-@app.get("/")
-def home():
-    return {
-        "message": "AI Response Quality Evaluator API is running."
-    }
+app.include_router(
+    evaluate.router,
+    prefix="/evaluate",
+    tags=["Evaluation"]
+)
 
 
-app.include_router(router)
+app.include_router(
+    validation.router,
+    prefix="/validation",
+    tags=["Validation"]
+)
