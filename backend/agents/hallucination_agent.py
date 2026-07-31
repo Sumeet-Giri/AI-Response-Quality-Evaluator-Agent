@@ -1,7 +1,7 @@
 from app.services.embedder import generate_query_embedding
 from app.services.similarity import calculate_cosine_similarity
 
-from models.hallucination_result import HallucinationResult
+from models.hallucination  import HallucinationResult
 
 
 class HallucinationDetectionAgent:
