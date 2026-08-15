@@ -42,7 +42,7 @@ def relevance_card(data):
             )
 
             st.progress(
-                min(1.0, sim),
+                max(0.0, min(1.0, sim)),
                 text=f"Semantic Similarity : {sim:.2f}"
             )
 
@@ -57,11 +57,51 @@ def relevance_card(data):
 # ACCURACY CARD
 # ===================================================
 
-def accuracy_card(data):
+def _rag_status_line(rag_info: dict | None):
+    """
+    Renders a one-line, honest explanation of where the reference text
+    used for Accuracy/Hallucination scoring came from. Previously there
+    was no visibility into this at all -- an auto-retrieved passage (or,
+    worse, an empty reference) was shown with no context, which looked
+    like a bug rather than an expected consequence of not supplying a
+    reference answer.
+    """
+    if not rag_info:
+        return
+
+    source = rag_info.get("source")
+
+    if source == "user_supplied":
+        return  # nothing surprising here -- the evidence below is exactly what was typed in.
+
+    if source == "retrieved":
+        distance = rag_info.get("similarity_distance")
+        similarity_pct = f"{(1 - distance) * 100:.0f}%" if isinstance(distance, (int, float)) else "unknown"
+        st.info(
+            f"🔎 No reference answer was supplied — this reference was "
+            f"auto-retrieved from the knowledge base (estimated relevance: {similarity_pct}).",
+            icon="🔎",
+        )
+        return
+
+    # source == "none"
+    st.warning(
+        "⚠️ No reference answer was supplied, and nothing sufficiently "
+        "relevant was found in the knowledge base for this question. "
+        "Accuracy and Hallucination below are scored against an empty "
+        "reference, which will generally score low regardless of how "
+        "correct the response actually is — provide a reference answer "
+        "for a meaningful score on these two dimensions.",
+        icon="⚠️",
+    )
+
+
+def accuracy_card(data, rag_info=None):
 
     with card():
 
         section_label("Accuracy Agent")
+        _rag_status_line(rag_info)
 
         c1, c2 = st.columns([1, 2])
 
@@ -79,17 +119,17 @@ def accuracy_card(data):
                 "factually_correct",
                 False
             )
+            unverified = bool(rag_info) and rag_info.get("source") == "none"
+
+            if unverified:
+                badge_text, badge_kind = "Unverified — No Reference Available", "neutral"
+            elif correct:
+                badge_text, badge_kind = "Factually Correct ✓", "good"
+            else:
+                badge_text, badge_kind = "Factual Issues Found", "bad"
 
             st.markdown(
-                badge_html(
-                    "Factually Correct ✓"
-                    if correct else
-                    "Factual Issues Found",
-
-                    "good"
-                    if correct else
-                    "bad"
-                ),
+                badge_html(badge_text, badge_kind),
                 unsafe_allow_html=True
             )
 
@@ -99,7 +139,7 @@ def accuracy_card(data):
             )
 
             st.progress(
-                min(1.0, sim),
+                max(0.0, min(1.0, sim)),
                 text=f"Semantic Similarity : {sim:.2f}"
             )
 
@@ -107,6 +147,7 @@ def accuracy_card(data):
                 "evidence",
                 []
             )
+            evidence = [e for e in evidence if e and e.strip()]
 
             if evidence:
 
@@ -130,13 +171,14 @@ def accuracy_card(data):
 # HALLUCINATION CARD
 # ===================================================
 
-def hallucination_card(data):
+def hallucination_card(data, rag_info=None):
 
     with card():
 
         section_label(
             "Hallucination Detection Agent"
         )
+        _rag_status_line(rag_info)
 
         c1, c2 = st.columns([1, 2])
 
@@ -154,18 +196,14 @@ def hallucination_card(data):
                 "hallucinated_claims",
                 []
             )
+            unverified = bool(rag_info) and rag_info.get("source") == "none"
 
-            risk_kind = (
-                "good"
-                if not hallucinated
-                else "warn"
-            )
-
-            risk_text = (
-                "Low Risk"
-                if not hallucinated
-                else f"{len(hallucinated)} Unsupported Claim(s)"
-            )
+            if unverified:
+                risk_kind, risk_text = "neutral", "Unverified — No Reference Available"
+            elif not hallucinated:
+                risk_kind, risk_text = "good", "Low Risk"
+            else:
+                risk_kind, risk_text = "warn", f"{len(hallucinated)} Unsupported Claim(s)"
 
             st.markdown(
                 badge_html(

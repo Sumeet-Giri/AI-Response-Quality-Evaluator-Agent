@@ -20,6 +20,11 @@ import random
 BACKEND_URL = os.getenv("EVAL_BACKEND_URL", "http://localhost:8000")
 TIMEOUT = 30
 
+# A pooled session (instead of a fresh connection per call) meaningfully cuts
+# per-request overhead when this client is used in a loop, e.g. batch
+# evaluation of many CSV rows against /evaluate/all.
+_SESSION = requests.Session()
+
 
 class BackendUnavailable(Exception):
     pass
@@ -27,9 +32,63 @@ class BackendUnavailable(Exception):
 
 def _post(endpoint: str, payload: dict) -> dict:
     url = f"{BACKEND_URL}{endpoint}"
-    resp = requests.post(url, json=payload, timeout=TIMEOUT)
+    resp = _SESSION.post(url, json=payload, timeout=TIMEOUT)
     resp.raise_for_status()
     return resp.json()
+
+
+# --------------------------------------------------------------------------
+# Backward-compatible normalization
+# --------------------------------------------------------------------------
+# The real backend's Pydantic models use dimension-specific field names
+# (hallucination_score, completeness_score) and VerdictResult.weighted_breakdown,
+# while the rest of this frontend (result_cards.py, single_evaluation.py) was
+# written against a generic `score` key and `weighted_score_breakdown`. That
+# mismatch meant real (non-mock) responses rendered as 0 / empty in the UI.
+#
+# These helpers ADD the expected aliases alongside the original keys — they
+# never remove or rewrite anything the backend sent, so nothing downstream
+# breaks; pages that already read the original field names keep working, and
+# pages that read the generic aliases now get real data too.
+def _normalize_dimension(kind: str, data: dict) -> dict:
+    if not isinstance(data, dict):
+        return data
+    if kind == "hallucination" and "score" not in data and "hallucination_score" in data:
+        data = {**data, "score": data["hallucination_score"]}
+    elif kind == "completeness" and "score" not in data and "completeness_score" in data:
+        data = {**data, "score": data["completeness_score"]}
+    return data
+
+
+def _normalize_verdict(data: dict) -> dict:
+    if not isinstance(data, dict):
+        return data
+    if "weighted_score_breakdown" not in data and "weighted_breakdown" in data:
+        data = {**data, "weighted_score_breakdown": data["weighted_breakdown"]}
+    return data
+
+
+def _normalize_all(data: dict) -> dict:
+    if not isinstance(data, dict):
+        return data
+    return {
+        "relevance": _normalize_dimension("relevance", data.get("relevance", {})),
+        "accuracy": _normalize_dimension("accuracy", data.get("accuracy", {})),
+        "hallucination": _normalize_dimension("hallucination", data.get("hallucination", {})),
+        "completeness": _normalize_dimension("completeness", data.get("completeness", {})),
+        "verdict": _normalize_verdict(data.get("verdict", {})),
+        # BUG FIX: this key was previously dropped entirely because this
+        # function rebuilds a fresh dict with only the 5 keys above. That
+        # silently broke the RAG-transparency warning on Single Evaluation
+        # (it was always rendering with rag_info=None) and meant PDF
+        # reports never explained *why* Accuracy/Hallucination scored 0
+        # when no reference was available -- it just looked like a
+        # correct answer and a wrong answer scoring identically for no
+        # visible reason. Found via a real user report, not caught by
+        # testing because the test mocked evaluate_all() directly instead
+        # of exercising this normalization function.
+        "rag": data.get("rag", {}),
+    }
 
 
 def _mock_payload(kind: str) -> dict:
@@ -96,31 +155,102 @@ def evaluate_dimension(dimension: str, question: str, response: str, reference: 
     """
     payload = {"question": question, "response": response, "reference_answer": reference}
     try:
-        return _post(f"/evaluate/{dimension}", payload), False
+        return _normalize_dimension(dimension, _post(f"/evaluate/{dimension}", payload)), False
     except Exception:
-        return _mock_payload(dimension), True
+        return _normalize_dimension(dimension, _mock_payload(dimension)), True
 
 
-def evaluate_all(question: str, response: str, reference: str = "") -> tuple[dict, bool]:
+def evaluate_all(
+    question: str,
+    response: str,
+    reference: str = "",
+    system_name: str = "Unspecified",
+    batch_id: str | None = None,
+    batch_label: str | None = None,
+) -> tuple[dict, bool]:
     """
     Calls POST /evaluate/all. Returns (data, used_mock).
+
+    system_name / batch_id / batch_label are optional tagging metadata for
+    the evaluation history the Dashboard reads from -- they don't affect
+    scoring at all. Omit them for an untagged single evaluation.
     """
-    payload = {"question": question, "response": response, "reference_answer": reference}
+    payload = {
+        "question": question,
+        "response": response,
+        "reference_answer": reference,
+        "system_name": system_name,
+    }
+    if batch_id:
+        payload["batch_id"] = batch_id
+        payload["batch_label"] = batch_label
     try:
-        return _post("/evaluate/all", payload), False
+        return _normalize_all(_post("/evaluate/all", payload)), False
     except Exception:
-        return {
+        return _normalize_all({
             "relevance": _mock_payload("relevance"),
             "accuracy": _mock_payload("accuracy"),
             "hallucination": _mock_payload("hallucination"),
             "completeness": _mock_payload("completeness"),
             "verdict": _mock_payload("verdict"),
-        }, True
+        }), True
 
 
 def backend_health() -> bool:
     try:
-        r = requests.get(f"{BACKEND_URL}/", timeout=3)
-        return r.status_code < 500
+        r = requests.get(f"{BACKEND_URL}/health", timeout=3)
+        return r.status_code == 200
     except Exception:
         return False
+
+
+# --------------------------------------------------------------------------
+# Evaluation history / Dashboard (Milestone 4)
+# --------------------------------------------------------------------------
+# These read from the SQLite-backed history that EvaluationOrchestrator
+# writes to automatically on every /evaluate/all call. If the backend is
+# unreachable, each function returns an empty/zeroed result rather than
+# raising, so the Dashboard page can render a clear "no data" state instead
+# of crashing.
+
+def get_history_summary() -> dict:
+    try:
+        r = _SESSION.get(f"{BACKEND_URL}/history/summary", timeout=TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return {}
+
+
+def get_batch_summaries(limit: int = 100) -> list[dict]:
+    try:
+        r = _SESSION.get(f"{BACKEND_URL}/history/batches", params={"limit": limit}, timeout=TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return []
+
+
+def get_system_summaries() -> list[dict]:
+    try:
+        r = _SESSION.get(f"{BACKEND_URL}/history/systems", timeout=TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return []
+
+
+def get_history_runs(system_name: str = None, batch_id: str = None, mode: str = None, limit: int = 500) -> list[dict]:
+    params = {"limit": limit}
+    if system_name:
+        params["system_name"] = system_name
+    if batch_id:
+        params["batch_id"] = batch_id
+    if mode:
+        params["mode"] = mode
+    try:
+        r = _SESSION.get(f"{BACKEND_URL}/history/runs", params=params, timeout=TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return []

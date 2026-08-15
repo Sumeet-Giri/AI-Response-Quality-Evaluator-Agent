@@ -2,160 +2,77 @@ from fastapi import APIRouter
 
 from app.schemas.request import EvaluationRequest
 
-from agents.relevance_agent import RelevanceJudgeAgent
-from agents.accuracy_agent import AccuracyJudgeAgent
-from agents.hallucination_agent import HallucinationDetectionAgent
-from agents.completeness_agent import CompletenessJudge
-from agents.verdict_agent import VerdictAgent
+from app.agents.relevance_agent import RelevanceJudgeAgent
+from app.agents.accuracy_agent import AccuracyJudgeAgent
+from app.agents.hallucination_agent import HallucinationDetectionAgent
+from app.agents.completeness_agent import CompletenessJudge
+
+from app.orchestration.orchestrator import EvaluationOrchestrator
 
 
 router = APIRouter()
 
+
+# ----------------------------------------------------------------------
+# Single-dimension endpoints
+# ----------------------------------------------------------------------
+# These stay simple and don't need the orchestrator: each one runs exactly
+# one agent and doesn't need RAG fallback or cross-agent sequencing.
+# Note: unlike /accuracy, /hallucination, /all and /verdict, these do NOT
+# get the RAG fallback (there's no reference_answer input to resolve for
+# relevance/completeness, and giving accuracy/hallucination fallback here
+# too would make single-dimension and combined endpoints behave
+# inconsistently for the same request). Use /evaluate/all for RAG-aware
+# accuracy/hallucination scoring.
+
 @router.post("/relevance")
 def evaluate_relevance(data: EvaluationRequest):
-
     agent = RelevanceJudgeAgent()
+    return agent.evaluate(data.question, data.response)
 
-    result = agent.evaluate(
-        data.question,
-        data.response
-    )
-
-    return result
 
 @router.post("/accuracy")
 def evaluate_accuracy(data: EvaluationRequest):
-
     agent = AccuracyJudgeAgent()
+    return agent.evaluate(data.response, data.reference_answer)
 
-    result = agent.evaluate(
-        data.response,
-        data.reference_answer
-    )
-
-    return result
 
 @router.post("/hallucination")
 def evaluate_hallucination(data: EvaluationRequest):
-
     agent = HallucinationDetectionAgent()
+    return agent.evaluate(data.response, data.reference_answer)
 
-    result = agent.evaluate(
-        data.response,
-        data.reference_answer
-    )
-
-    return result
 
 @router.post("/completeness")
 def evaluate_completeness(data: EvaluationRequest):
-
     agent = CompletenessJudge()
+    return agent.evaluate(data.question, data.response)
 
-    result = agent.evaluate(
-        data.question,
-        data.response
-    )
 
-    return result
+# ----------------------------------------------------------------------
+# Full-pipeline endpoints -- both delegate to EvaluationOrchestrator
+# instead of duplicating agent sequencing inline (previously /verdict and
+# /all each independently instantiated and called all five agents).
+# ----------------------------------------------------------------------
 
 @router.post("/verdict")
 def evaluate_verdict(data: EvaluationRequest):
-
-    # Initialize all agents
-    relevance_agent = RelevanceJudgeAgent()
-    accuracy_agent = AccuracyJudgeAgent()
-    hallucination_agent = HallucinationDetectionAgent()
-    completeness_agent = CompletenessJudge()
-    verdict_agent = VerdictAgent()
-
-    # Relevance Evaluation
-    relevance_result = relevance_agent.evaluate(
+    orchestrator = EvaluationOrchestrator()
+    return orchestrator.run_verdict_only(
         data.question,
-        data.response
-    )
-
-    # Accuracy Evaluation
-    accuracy_result = accuracy_agent.evaluate(
         data.response,
-        data.reference_answer
+        data.reference_answer,
     )
 
-    # Hallucination Evaluation
-    hallucination_result = hallucination_agent.evaluate(
-        data.response,
-        data.reference_answer
-    )
-
-    # Completeness Evaluation
-    completeness_result = completeness_agent.evaluate(
-        data.question,
-        data.response
-    )
-
-    # Verdict Evaluation
-    verdict_result = verdict_agent.evaluate(
-        relevance_result,
-        accuracy_result,
-        hallucination_result,
-        completeness_result
-    )
-
-    return verdict_result
 
 @router.post("/all")
 def evaluate_all(data: EvaluationRequest):
-
-    # Initialize all agents
-    relevance_agent = RelevanceJudgeAgent()
-    accuracy_agent = AccuracyJudgeAgent()
-    hallucination_agent = HallucinationDetectionAgent()
-    completeness_agent = CompletenessJudge()
-    verdict_agent = VerdictAgent()
-
-    # Relevance Evaluation
-    relevance_result = relevance_agent.evaluate(
+    orchestrator = EvaluationOrchestrator()
+    return orchestrator.run_all(
         data.question,
-        data.response
-    )
-
-    # Accuracy Evaluation
-    accuracy_result = accuracy_agent.evaluate(
         data.response,
-        data.reference_answer
+        data.reference_answer,
+        system_name=data.system_name,
+        batch_id=data.batch_id,
+        batch_label=data.batch_label,
     )
-
-    # Hallucination Evaluation
-    hallucination_result = hallucination_agent.evaluate(
-        data.response,
-        data.reference_answer
-    )
-
-    # Completeness Evaluation
-    completeness_result = completeness_agent.evaluate(
-        data.question,
-        data.response
-    )
-
-    # Verdict Evaluation
-    verdict_result = verdict_agent.evaluate(
-    relevance_result,
-    accuracy_result,
-    hallucination_result,
-    completeness_result
-    )
-
-    # Return all results
-    return {
-
-        "relevance": relevance_result,
-
-        "accuracy": accuracy_result,
-
-        "hallucination": hallucination_result,
-
-        "completeness": completeness_result,
-
-        "verdict": verdict_result
-
-    }

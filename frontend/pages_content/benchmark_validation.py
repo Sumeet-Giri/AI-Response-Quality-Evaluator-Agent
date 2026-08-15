@@ -1,149 +1,294 @@
-import io
-import time
+"""
+Benchmark Validation / Batch Evaluation
+-----------------------------------------
+Upload a CSV of question/response/reference_answer triples, validate it,
+run every row through the full multi-agent pipeline (/evaluate/all), and
+review aggregate quality analytics -- with graceful handling of malformed
+CSVs, missing values, and per-row API failures.
+
+render() keeps its original signature so app.py's nav wiring is untouched.
+"""
+
 import pandas as pd
 import streamlit as st
 
-from components.badges import card_open, card_close, section_label, metric_tile
-from components.charts import render_distribution_chart, render_score_bar
-from utils.api_client import evaluate_all
+from components.badges import card, section_label, metric_tile
+from components.charts import render_distribution_chart, render_score_bar, render_radar_chart
+from components.batch_charts import render_pass_fail_pie, render_score_trend
+from components.batch_summary import summary_tiles, standout_responses
+
+from utils.csv_parser import load_and_validate_csv, sample_dataset, REQUIRED_COLUMNS
+from utils.batch_processor import run_batch
+from utils.download_utils import to_csv_bytes, to_excel_bytes, to_json_bytes
+from utils.pdf_export import build_batch_evaluation_pdf
 
 
 def render():
     st.markdown("<div class='hero-title' style='font-size:30px'>Benchmark Validation</div>", unsafe_allow_html=True)
     st.markdown(
-        "<div class='hero-sub'>Upload a CSV of question / response / reference triples to run "
-        "batch evaluation across the full agent pipeline and review aggregate quality metrics.</div>",
+        "<div class='hero-sub'>Upload a CSV of question / response / reference-answer triples to run "
+        "batch evaluation across the full multi-agent pipeline and review aggregate quality metrics.</div>",
         unsafe_allow_html=True,
     )
     st.write("")
 
-    section_label("1. Upload Benchmark Dataset")
-    card_open()
-    st.caption("Expected columns: `question`, `response`, `reference_answer` (optional)")
-    uploaded = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
-
-    use_sample = st.checkbox("No file? Use a small built-in sample dataset instead", value=uploaded is None)
-    card_close()
-
-    df = None
-    if uploaded is not None:
-        try:
-            df = pd.read_csv(uploaded)
-        except Exception as e:
-            st.error(f"Could not read CSV: {e}")
-    elif use_sample:
-        df = _sample_dataset()
-
+    df = _upload_and_validate_step()
     if df is None:
         return
 
-    st.write("")
-    section_label("2. Preview")
-    card_open()
-    st.dataframe(df.head(10), use_container_width=True)
-    card_close()
+    _preview_step(df)
 
     st.write("")
-    run = st.button(f"▶ Run Batch Evaluation ({len(df)} rows)")
+    section_label("3. Tag This Run (for the Dashboard)")
+    with card():
+        t1, t2 = st.columns(2)
+        with t1:
+            system_name = st.text_input(
+                "🏷️ AI System / Model Name (optional)",
+                placeholder="e.g. GPT-4, Claude-3-Sonnet...",
+                help="Groups this batch under a system name so it can be compared "
+                     "against other systems on the Dashboard.",
+                key="batch_system_name",
+            )
+        with t2:
+            batch_label = st.text_input(
+                "📝 Run Label (optional)",
+                placeholder="e.g. \"Trivia set v2\", \"Post-finetune check\"...",
+                help="A human-readable name for this specific batch run, shown in the "
+                     "Dashboard's batch history table.",
+                key="batch_run_label",
+            )
+
+    st.write("")
+    run_col, count_col = st.columns([1, 3])
+    with run_col:
+        run = st.button(f"▶ Run Batch Evaluation ({len(df)} rows)", use_container_width=True)
+    with count_col:
+        st.caption(
+            "Each row calls `/evaluate/all` sequentially. Estimated time depends on backend latency; "
+            "progress and ETA are shown live below once you start. Every row is automatically "
+            "recorded to evaluation history for the Dashboard."
+        )
 
     if run:
-        results = _run_batch(df)
-        st.session_state["benchmark_results"] = results
+        st.session_state.pop("batch_results", None)
+        _run_batch_step(
+            df,
+            system_name=(system_name or "").strip() or "Unspecified",
+            batch_label=(batch_label or "").strip() or None,
+        )
 
-    if "benchmark_results" in st.session_state:
-        _render_benchmark_results(st.session_state["benchmark_results"])
-
-
-def _sample_dataset() -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {"question": "What causes rainbows?", "response": "Rainbows form when sunlight is refracted and reflected inside water droplets.", "reference_answer": "Refraction and reflection of light in water droplets."},
-            {"question": "Who wrote Hamlet?", "response": "Hamlet was written by William Shakespeare in the early 1600s.", "reference_answer": "William Shakespeare."},
-            {"question": "What is the capital of Australia?", "response": "The capital of Australia is Sydney.", "reference_answer": "Canberra."},
-            {"question": "How does photosynthesis work?", "response": "Plants use sunlight, water, and CO2 to produce glucose and oxygen via chlorophyll.", "reference_answer": "Conversion of light energy into chemical energy using chlorophyll."},
-            {"question": "What is the speed of light?", "response": "The speed of light in vacuum is approximately 300,000 km/s.", "reference_answer": "299,792 km/s in a vacuum."},
-        ]
-    )
+    if "batch_results" in st.session_state:
+        _render_results(st.session_state["batch_results"], st.session_state.get("batch_tags", {}))
 
 
-def _run_batch(df: pd.DataFrame):
-    progress = st.progress(0.0, text="Starting batch evaluation...")
-    rows = []
-    n = len(df)
-    for i, row in df.iterrows():
-        q = str(row.get("question", ""))
-        r = str(row.get("response", ""))
-        ref = str(row.get("reference_answer", "")) if "reference_answer" in df.columns else ""
-        data, used_mock = evaluate_all(q, r, ref)
-        v = data.get("verdict", {})
-        breakdown = v.get("weighted_score_breakdown", {})
-        rows.append({
-            "question": q[:60] + ("..." if len(q) > 60 else ""),
-            "relevance": breakdown.get("relevance"),
-            "accuracy": breakdown.get("accuracy"),
-            "hallucination": breakdown.get("hallucination"),
-            "completeness": breakdown.get("completeness"),
-            "overall_score": v.get("overall_score"),
-            "final_verdict": v.get("final_verdict"),
-            "quality_gate_passed": v.get("quality_gate_passed"),
-        })
-        progress.progress((i + 1) / n, text=f"Evaluating row {i + 1}/{n}...")
-        time.sleep(0.05)
-    progress.empty()
-    return {"table": pd.DataFrame(rows), "used_mock": used_mock}
+# --------------------------------------------------------------------------
+# STEP 1 -- Upload & Validate
+# --------------------------------------------------------------------------
+
+def _upload_and_validate_step():
+    section_label("1. Upload Dataset")
+    with card():
+        st.caption("Expected columns: `question`, `response`, `reference_answer` (optional)")
+        uploaded = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
+        use_sample = st.checkbox("No file? Use a small built-in sample dataset instead", value=uploaded is None)
+
+    df, errors, warnings = None, [], []
+
+    if uploaded is not None:
+        df, errors, warnings = load_and_validate_csv(uploaded)
+    elif use_sample:
+        df = sample_dataset()
+
+    if df is None and not errors and not use_sample:
+        return None  # nothing uploaded yet, nothing to show
+
+    if errors:
+        with card():
+            st.error(
+                "This CSV can't be evaluated yet:\n\n" + "\n".join(f"- {e}" for e in errors)
+            )
+            st.caption(f"Required columns: {', '.join(REQUIRED_COLUMNS)}")
+        return None
+
+    if warnings:
+        with card():
+            for w in warnings:
+                st.warning(w, icon="⚠️")
+
+    return df
 
 
-def _render_benchmark_results(results):
+# --------------------------------------------------------------------------
+# STEP 2 -- Preview
+# --------------------------------------------------------------------------
+
+def _preview_step(df: pd.DataFrame):
+    st.write("")
+    section_label("2. Dataset Preview")
+    with card():
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            metric_tile("Rows", str(len(df)))
+        with m2:
+            metric_tile("Columns", str(len(df.columns)))
+        with m3:
+            missing = int(df.isna().sum().sum()) + int((df.astype(str) == "").sum().sum())
+            metric_tile("Missing Values", str(missing))
+        st.write("")
+        st.dataframe(df.head(10), use_container_width=True)
+
+
+# --------------------------------------------------------------------------
+# STEP 3 -- Run
+# --------------------------------------------------------------------------
+
+def _run_batch_step(df: pd.DataFrame, system_name: str = "Unspecified", batch_label: str | None = None):
+    section_label("4. Running Batch Evaluation")
+    with card():
+        progress_bar = st.progress(0.0, text="Starting batch evaluation...")
+        status_line = st.empty()
+
+        def _on_progress(done, total, elapsed, remaining):
+            pct = done / total
+            status_line.caption(
+                f"Row {done}/{total}  •  Elapsed: {elapsed:.1f}s  •  Estimated remaining: {remaining:.1f}s"
+            )
+            progress_bar.progress(pct, text=f"Evaluating row {done}/{total}...")
+
+        results = run_batch(
+            df,
+            progress_callback=_on_progress,
+            system_name=system_name,
+            batch_label=batch_label,
+        )
+        progress_bar.progress(1.0, text=f"Done — {len(df)} rows evaluated in {results['total_time']:.1f}s.")
+
+    st.session_state["batch_results"] = results
+    st.session_state["batch_tags"] = {"system_name": system_name, "batch_label": batch_label or ""}
+
+
+# --------------------------------------------------------------------------
+# STEP 4 -- Results, Analytics, Export
+# --------------------------------------------------------------------------
+
+def _render_results(results: dict, tags: dict = None):
+    tags = tags or {}
     table: pd.DataFrame = results["table"]
+    errors: list = results["errors"]
+
     if results.get("used_mock"):
         st.info(
-            "⚠️ Backend not reachable — batch results below use demo data so the dashboard "
-            "layout can still be reviewed.",
+            "⚠️ Backend not reachable for at least one row — some results below use demo data "
+            "so the dashboard layout can still be reviewed. Connect the FastAPI backend for real scores.",
             icon="⚠️",
         )
 
     st.write("")
-    section_label("3. Benchmark Summary")
-    avg_overall = table["overall_score"].mean()
-    pass_rate = (table["quality_gate_passed"].sum() / len(table)) * 100
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        metric_tile("Rows Evaluated", str(len(table)))
-    with m2:
-        metric_tile("Avg. Overall Score", f"{avg_overall:.2f}/10")
-    with m3:
-        metric_tile("Quality Gate Pass Rate", f"{pass_rate:.0f}%")
-    with m4:
-        metric_tile("Avg. Hallucination Score", f"{table['hallucination'].mean():.2f}/10")
+    section_label("5. Summary")
+    summary_tiles(table)
+
+    # ---------------- Failed rows ----------------
+    if errors:
+        st.write("")
+        with card():
+            section_label(f"⚠ {len(errors)} Row(s) Failed")
+            st.caption("These rows raised an error during evaluation and were skipped; the rest of the batch continued.")
+            st.dataframe(pd.DataFrame(errors), use_container_width=True)
+
+    # ---------------- Charts ----------------
+    scored = table[table["final_verdict"] != "ERROR"]
 
     st.write("")
+    section_label("6. Analytics")
+
     c1, c2 = st.columns(2)
     with c1:
-        card_open()
-        st.markdown("**Score Distribution (Overall)**")
-        render_distribution_chart(table["overall_score"].dropna().tolist(), key="dist_benchmark")
-        card_close()
+        with card():
+            st.markdown("**Score Distribution (Overall)**")
+            render_distribution_chart(scored["overall_score"].dropna().tolist(), key="dist_batch")
     with c2:
-        card_open()
-        st.markdown("**Average Score by Dimension**")
-        avg_scores = {
-            "Relevance": table["relevance"].mean(),
-            "Accuracy": table["accuracy"].mean(),
-            "Hallucination": table["hallucination"].mean(),
-            "Completeness": table["completeness"].mean(),
-        }
-        render_score_bar(avg_scores, key="bar_benchmark")
-        card_close()
+        with card():
+            st.markdown("**Pass / Fail Breakdown**")
+            n_pass = int((scored["pass_fail"] == "PASS").sum())
+            n_fail = int((scored["pass_fail"] == "FAIL").sum())
+            render_pass_fail_pie(n_pass, n_fail, len(errors), key="pie_batch")
 
+    avg_scores = {
+        "Relevance": scored["relevance"].mean(),
+        "Accuracy": scored["accuracy"].mean(),
+        "Hallucination": scored["hallucination"].mean(),
+        "Completeness": scored["completeness"].mean(),
+    }
+    c3, c4 = st.columns(2)
+    with c3:
+        with card():
+            st.markdown("**Agent-wise Average (Radar)**")
+            render_radar_chart(avg_scores, key="radar_batch")
+    with c4:
+        with card():
+            st.markdown("**Agent-wise Average (Bar)**")
+            render_score_bar(avg_scores, key="bar_batch")
+
+    with card():
+        st.markdown("**Overall Score Trend (Upload Order)**")
+        render_score_trend(scored["overall_score"].dropna().tolist(), key="trend_batch")
+
+    # ---------------- Standout responses ----------------
     st.write("")
-    section_label("4. Detailed Results")
-    card_open()
-    st.dataframe(table, use_container_width=True)
-    csv_bytes = table.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇ Download Evaluation Report (CSV)",
-        data=csv_bytes,
-        file_name="benchmark_evaluation_report.csv",
-        mime="text/csv",
-    )
-    card_close()
+    section_label("7. Standout Responses")
+    standout_responses(table)
+
+    # ---------------- Detailed table ----------------
+    st.write("")
+    section_label("8. Detailed Results")
+    with card():
+        display_cols = [
+            "#", "question", "overall_score", "relevance", "accuracy",
+            "hallucination", "completeness", "final_verdict", "pass_fail",
+        ]
+        st.dataframe(table[display_cols], use_container_width=True)
+
+        st.write("")
+        d1, d2, d3, d4 = st.columns(4)
+        with d1:
+            st.download_button(
+                "⬇ Download CSV",
+                data=to_csv_bytes(table),
+                file_name="batch_evaluation_report.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        with d2:
+            try:
+                excel_bytes = to_excel_bytes(table)
+                st.download_button(
+                    "⬇ Download Excel",
+                    data=excel_bytes,
+                    file_name="batch_evaluation_report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except ImportError:
+                st.caption("Install `openpyxl` to enable Excel export.")
+        with d3:
+            st.download_button(
+                "⬇ Download JSON (full detail)",
+                data=to_json_bytes(results["full_rows"]),
+                file_name="batch_evaluation_full.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        with d4:
+            pdf_bytes = build_batch_evaluation_pdf(
+                table,
+                system_name=tags.get("system_name", "Unspecified"),
+                batch_label=tags.get("batch_label", ""),
+            )
+            st.download_button(
+                "📄 Download PDF Report",
+                data=pdf_bytes,
+                file_name="batch_evaluation_report.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )

@@ -1,7 +1,7 @@
 import streamlit as st
 from pathlib import Path
 
-from pages_content import home, about, single_evaluation, benchmark_validation
+from pages_content import home, about, single_evaluation, benchmark_validation, dashboard
 from utils.api_client import backend_health
 
 st.set_page_config(
@@ -35,7 +35,7 @@ def sidebar_nav() -> str:
 
         page = st.radio(
             "Navigate",
-            ["🏠 Home", "📘 About Project", "🧪 Single Evaluation", "📊 Benchmark Validation"],
+            ["🏠 Home", "📘 About Project", "🧪 Single Evaluation", "📊 Benchmark Validation", "📈 Dashboard"],
             label_visibility="collapsed",
         )
 
@@ -47,7 +47,7 @@ def sidebar_nav() -> str:
             else "<span class='badge badge-warn'>● Backend Offline (Demo Mode)</span>"
         )
         st.markdown(status_badge, unsafe_allow_html=True)
-        st.caption("Milestone 1: Jun 30 – Jul 9")
+        st.caption("Milestone 4: Dashboard, Reports & Final Demo")
 
     return page
 
@@ -64,6 +64,8 @@ def main():
         single_evaluation.render()
     elif page == "📊 Benchmark Validation":
         benchmark_validation.render()
+    elif page == "📈 Dashboard":
+        dashboard.render()
 
 
 if __name__ == "__main__":
