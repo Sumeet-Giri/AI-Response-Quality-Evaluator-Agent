@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -15,16 +16,19 @@ logger = logging.getLogger("evaluator")
 logging.basicConfig(level=logging.INFO)
 
 
-app = FastAPI(
-    title="AI Response Quality Evaluator Agent"
-)
-
-
-@app.on_event("startup")
-def _startup():
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
     # Idempotent -- safe to call on every process start, creates the
     # evaluation_history.db table/indexes if they don't already exist.
+    # (Modern replacement for the deprecated @app.on_event("startup").)
     history_store.init_db()
+    yield
+
+
+app = FastAPI(
+    title="AI Response Quality Evaluator Agent",
+    lifespan=_lifespan,
+)
 
 
 app.include_router(
