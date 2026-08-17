@@ -7,10 +7,17 @@ endpoints. This is what makes "quality trends across batch evaluations"
 and "compare two AI systems" real: both require data that outlives one
 Streamlit session, which is exactly what the history store provides.
 
+Filters (date range, model/system, dataset, evaluation mode) apply to
+every section on the page -- summary tiles, dimension scores, the
+Pass/Needs Improvement/Fail breakdown, batch trends, and system
+comparison all read from the same filtered query, not just the top
+tiles, so the whole page consistently reflects the selected filters.
+
 Deliberately reuses existing chart components (render_radar_chart,
-render_score_bar, render_score_trend, render_pass_fail_pie) rather than
-introducing new near-duplicate chart code -- the only genuinely new visual
-here is laying those same components out per-system for comparison.
+render_score_bar, render_score_trend, render_pass_fail_pie,
+render_verdict_breakdown_pie) rather than introducing new near-duplicate
+chart code -- the only genuinely new visual here is laying those same
+components out per-system for comparison.
 """
 
 import pandas as pd
@@ -18,13 +25,14 @@ import streamlit as st
 
 from components.badges import card, section_label, metric_tile
 from components.charts import render_radar_chart, render_score_bar, render_distribution_chart
-from components.batch_charts import render_pass_fail_pie, render_score_trend
+from components.batch_charts import render_pass_fail_pie, render_verdict_breakdown_pie, render_score_trend
 
 from utils.api_client import (
     get_history_summary,
     get_batch_summaries,
     get_system_summaries,
     get_history_runs,
+    get_filter_options,
 )
 
 
@@ -38,21 +46,30 @@ def render():
     )
     st.write("")
 
+    filters = _render_filter_bar()
+
     r1, r2 = st.columns([1, 5])
     with r1:
         if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
 
-    summary = get_history_summary()
+    summary = get_history_summary(**filters)
     total = summary.get("total_evaluations") or 0
 
     if not total:
         with card():
-            st.info(
-                "No evaluation history yet. Run a Single Evaluation or a Batch Evaluation first -- "
-                "every evaluation is automatically recorded here.",
-                icon="📭",
-            )
+            if any(filters.values()):
+                st.info(
+                    "No evaluations match the selected filters. Try widening the date range or "
+                    "clearing a filter above.",
+                    icon="🔍",
+                )
+            else:
+                st.info(
+                    "No evaluation history yet. Run a Single Evaluation or a Batch Evaluation first -- "
+                    "every evaluation is automatically recorded here.",
+                    icon="📭",
+                )
         return
 
     # ---------------- Overall summary ----------------
@@ -62,7 +79,7 @@ def render():
 
     # ---------------- Average dimension scores ----------------
     st.write("")
-    section_label("Average Dimension Scores (All History)")
+    section_label("Average Dimension Scores")
     avg_scores = {
         "Relevance": summary.get("avg_relevance") or 0,
         "Accuracy": summary.get("avg_accuracy") or 0,
@@ -79,18 +96,22 @@ def render():
             st.markdown("**Bar**")
             render_score_bar(avg_scores, key="dash_bar_overall")
 
-    # ---------------- Pass/fail + hallucination frequency ----------------
+    # ---------------- Verdict breakdown + hallucination frequency ----------------
     st.write("")
-    section_label("Quality Gate & Hallucination Frequency")
+    section_label("Quality Verdict Breakdown & Hallucination Frequency")
     c3, c4 = st.columns(2)
     with c3:
         with card():
-            st.markdown("**Pass / Fail (Quality Gate, All History)**")
-            render_pass_fail_pie(
-                pass_count=summary.get("total_pass") or 0,
-                fail_count=summary.get("total_fail") or 0,
-                error_count=0,
-                key="dash_pass_fail_pie",
+            st.markdown("**Pass / Needs Improvement / Fail**")
+            render_verdict_breakdown_pie(
+                pass_count=summary.get("pass_count") or 0,
+                needs_improvement_count=summary.get("needs_improvement_count") or 0,
+                fail_count=summary.get("fail_count") or 0,
+                key="dash_verdict_pie",
+            )
+            st.caption(
+                "Pass = EXCELLENT/GOOD · Needs Improvement = NEEDS IMPROVEMENT/POOR · "
+                "Fail = quality gate failed."
             )
     with c4:
         with card():
@@ -103,13 +124,24 @@ def render():
             )
             metric_tile("Avg Hallucination-Free Score", f"{(summary.get('avg_hallucination') or 0):.1f}/10")
 
+    with card():
+        st.markdown("**Quality Gate (Binary) — Pass / Fail**")
+        render_pass_fail_pie(
+            pass_count=summary.get("total_pass") or 0,
+            fail_count=summary.get("total_fail") or 0,
+            error_count=0,
+            key="dash_pass_fail_pie",
+        )
+
     # ---------------- Trends across batch evaluations ----------------
     st.write("")
     section_label("Quality Trends Across Batch Evaluations")
-    batches = get_batch_summaries()
+    batch_filters = {k: v for k, v in filters.items() if k != "mode"}  # get_batches has no mode param
+    batches = get_batch_summaries(**batch_filters)
     if not batches:
         with card():
-            st.caption("No batch runs recorded yet -- run a Benchmark Validation batch to populate this section.")
+            st.caption("No batch runs match the current filters -- run a Benchmark Validation batch, "
+                       "or widen the filters above, to populate this section.")
     else:
         batches_sorted = sorted(batches, key=lambda b: b["started_at"])
         with card():
@@ -129,8 +161,9 @@ def render():
                     "Started": b["started_at"][:19].replace("T", " "),
                     "Rows": b["row_count"],
                     "Avg Score": round(b["avg_overall_score"] or 0, 2),
-                    "Pass": b["pass_count"],
-                    "Fail": b["fail_count"],
+                    "Pass": b.get("pass_verdict_count", b["pass_count"]),
+                    "Needs Improvement": b.get("needs_improvement_count", 0),
+                    "Fail": b.get("fail_verdict_count", b["fail_count"]),
                 }
                 for b in batches_sorted[::-1]
             ])
@@ -139,8 +172,62 @@ def render():
     # ---------------- System comparison ----------------
     st.write("")
     section_label("Compare AI Systems")
-    systems = get_system_summaries()
+    system_filters = {k: v for k, v in filters.items() if k != "system_name"}  # comparison can't filter on itself
+    systems = get_system_summaries(**system_filters)
     _render_system_comparison(systems)
+
+
+def _render_filter_bar():
+    """
+    Renders the filter row and returns a dict of the currently selected
+    filters (system_name, mode, dataset, date_from, date_to), each None
+    if not set -- ready to pass straight through as kwargs to the
+    get_history_* API functions, which already treat None as "no filter".
+    """
+    options = get_filter_options()
+
+    with card():
+        st.markdown("**Filters**")
+        f1, f2, f3, f4, f5 = st.columns([1.3, 1.3, 1, 1, 1])
+
+        with f1:
+            system_choice = st.selectbox(
+                "Model / System",
+                ["All"] + options.get("systems", []),
+                key="dash_filter_system",
+            )
+        with f2:
+            dataset_choice = st.selectbox(
+                "Dataset",
+                ["All"] + options.get("datasets", []),
+                key="dash_filter_dataset",
+                help="Filters by the Run Label tagged on a batch (or dataset name, if you use that "
+                     "field for it). Single evaluations have no dataset and are excluded when this filter is set.",
+            )
+        with f3:
+            mode_choice = st.selectbox(
+                "Evaluation Mode",
+                ["All", "single", "batch"],
+                key="dash_filter_mode",
+            )
+        with f4:
+            date_from = st.date_input("From", value=None, key="dash_filter_date_from")
+        with f5:
+            date_to = st.date_input("To", value=None, key="dash_filter_date_to")
+
+        if st.button("✕ Clear Filters", key="dash_clear_filters"):
+            for k in ["dash_filter_system", "dash_filter_dataset", "dash_filter_mode",
+                      "dash_filter_date_from", "dash_filter_date_to"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+
+    return {
+        "system_name": None if system_choice == "All" else system_choice,
+        "dataset": None if dataset_choice == "All" else dataset_choice,
+        "mode": None if mode_choice == "All" else mode_choice,
+        "date_from": date_from if date_from else None,
+        "date_to": date_to if date_to else None,
+    }
 
 
 def _render_summary_tiles(summary: dict):
@@ -158,6 +245,16 @@ def _render_summary_tiles(summary: dict):
         metric_tile("Pass %", f"{total_pass / denom * 100:.0f}%")
     with r1[3]:
         metric_tile("Fail %", f"{total_fail / denom * 100:.0f}%")
+
+    r2 = st.columns(4)
+    with r2[0]:
+        metric_tile("Pass (Verdict)", str(summary.get("pass_count") or 0))
+    with r2[1]:
+        metric_tile("Needs Improvement", str(summary.get("needs_improvement_count") or 0))
+    with r2[2]:
+        metric_tile("Fail (Verdict)", str(summary.get("fail_count") or 0))
+    with r2[3]:
+        metric_tile("Avg Completeness", f"{(summary.get('avg_completeness') or 0):.1f}/10")
 
 
 def _render_system_comparison(systems: list[dict]):
@@ -181,8 +278,39 @@ def _render_system_comparison(systems: list[dict]):
             _system_mini_summary(systems[0])
         return
 
-    cols = st.columns(len(systems))
-    for col, sysrow in zip(cols, systems):
+    MAX_COMPARE_COLUMNS = 4
+    display_systems = systems
+
+    if len(systems) > MAX_COMPARE_COLUMNS:
+        # Squeezing one narrow column per system stops being readable well
+        # before this point -- labels wrap, bars overlap, text truncates.
+        # Let the user pick which ones to actually compare side-by-side
+        # instead; the full table below always lists every system anyway.
+        with card():
+            st.caption(
+                f"{len(systems)} systems are tagged in the current filter -- showing all of them as "
+                f"side-by-side cards stops being readable, so pick up to {MAX_COMPARE_COLUMNS} below. "
+                "Every system is always listed in the table beneath the cards."
+            )
+            system_names = [s["system_name"] for s in systems]
+            default_names = [
+                s["system_name"]
+                for s in sorted(systems, key=lambda s: s["total_evaluations"], reverse=True)[:MAX_COMPARE_COLUMNS]
+            ]
+            selected_names = st.multiselect(
+                "Systems to compare",
+                options=system_names,
+                default=default_names,
+                max_selections=MAX_COMPARE_COLUMNS,
+                key="dash_compare_system_select",
+            )
+        selected_set = set(selected_names)
+        display_systems = [s for s in systems if s["system_name"] in selected_set]
+        if not display_systems:
+            display_systems = sorted(systems, key=lambda s: s["total_evaluations"], reverse=True)[:MAX_COMPARE_COLUMNS]
+
+    cols = st.columns(len(display_systems))
+    for col, sysrow in zip(cols, display_systems):
         with col:
             with card():
                 st.markdown(f"**{sysrow['system_name']}**")

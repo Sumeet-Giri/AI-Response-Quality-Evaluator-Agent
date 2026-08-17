@@ -213,41 +213,65 @@ def backend_health() -> bool:
 # raising, so the Dashboard page can render a clear "no data" state instead
 # of crashing.
 
-def get_history_summary() -> dict:
+def _filter_params(system_name=None, mode=None, dataset=None, date_from=None, date_to=None, **extra):
+    params = dict(extra)
+    if system_name:
+        params["system_name"] = system_name
+    if mode:
+        params["mode"] = mode
+    if dataset:
+        params["dataset"] = dataset
+    if date_from:
+        params["date_from"] = str(date_from)
+    if date_to:
+        params["date_to"] = str(date_to)
+    return params
+
+
+def get_history_summary(system_name=None, mode=None, dataset=None, date_from=None, date_to=None) -> dict:
     try:
-        r = _SESSION.get(f"{BACKEND_URL}/history/summary", timeout=TIMEOUT)
+        params = _filter_params(system_name, mode, dataset, date_from, date_to)
+        r = _SESSION.get(f"{BACKEND_URL}/history/summary", params=params, timeout=TIMEOUT)
         r.raise_for_status()
         return r.json()
     except Exception:
         return {}
 
 
-def get_batch_summaries(limit: int = 100) -> list[dict]:
+def get_batch_summaries(system_name=None, dataset=None, date_from=None, date_to=None, limit: int = 100) -> list[dict]:
     try:
-        r = _SESSION.get(f"{BACKEND_URL}/history/batches", params={"limit": limit}, timeout=TIMEOUT)
+        params = _filter_params(system_name, None, dataset, date_from, date_to, limit=limit)
+        r = _SESSION.get(f"{BACKEND_URL}/history/batches", params=params, timeout=TIMEOUT)
         r.raise_for_status()
         return r.json()
     except Exception:
         return []
 
 
-def get_system_summaries() -> list[dict]:
+def get_system_summaries(mode=None, dataset=None, date_from=None, date_to=None) -> list[dict]:
     try:
-        r = _SESSION.get(f"{BACKEND_URL}/history/systems", timeout=TIMEOUT)
+        params = _filter_params(None, mode, dataset, date_from, date_to)
+        r = _SESSION.get(f"{BACKEND_URL}/history/systems", params=params, timeout=TIMEOUT)
         r.raise_for_status()
         return r.json()
     except Exception:
         return []
 
 
-def get_history_runs(system_name: str = None, batch_id: str = None, mode: str = None, limit: int = 500) -> list[dict]:
-    params = {"limit": limit}
-    if system_name:
-        params["system_name"] = system_name
+def get_filter_options() -> dict:
+    try:
+        r = _SESSION.get(f"{BACKEND_URL}/history/filter-options", timeout=TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return {"systems": [], "datasets": [], "modes": [], "earliest": None, "latest": None}
+
+
+def get_history_runs(system_name: str = None, batch_id: str = None, mode: str = None,
+                      dataset: str = None, date_from=None, date_to=None, limit: int = 500) -> list[dict]:
+    params = _filter_params(system_name, mode, dataset, date_from, date_to, limit=limit)
     if batch_id:
         params["batch_id"] = batch_id
-    if mode:
-        params["mode"] = mode
     try:
         r = _SESSION.get(f"{BACKEND_URL}/history/runs", params=params, timeout=TIMEOUT)
         r.raise_for_status()

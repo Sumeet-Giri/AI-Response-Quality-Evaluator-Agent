@@ -20,11 +20,30 @@ It has zero effect on `uvicorn app.main:app` in normal use, which uses the
 real packages declared in requirements.txt.
 """
 
+import os
 import sys
+import tempfile
 import types
 import hashlib
 
 import numpy as np
+
+# --------------------------------------------------------------------
+# Isolate the test suite's database from the real one
+# --------------------------------------------------------------------
+# Must happen before app.services.history_store (or anything that
+# imports it) is loaded for the first time -- history_store reads
+# EVAL_HISTORY_DB_PATH once, at import time, to decide where to read/
+# write. Without this, running `pytest` boots the real app via
+# TestClient (see tests/test_e2e_integration.py) and silently writes
+# test fixture data -- system names like "BatchTestSystem",
+# "IntegrationTestSystem", "FilterTestSystemA" -- straight into the
+# SAME evaluation_history.db the live `uvicorn` server uses, polluting
+# real Dashboard data. This was a real bug, not a hypothetical one.
+os.environ.setdefault(
+    "EVAL_HISTORY_DB_PATH",
+    os.path.join(tempfile.gettempdir(), f"eval_test_history_{os.getpid()}.db"),
+)
 
 _DIM = 384
 

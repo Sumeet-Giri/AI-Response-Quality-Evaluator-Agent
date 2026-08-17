@@ -17,6 +17,7 @@ The existing hallucination_score is preserved because it is used by the
 Verdict Agent and existing dashboard logic.
 """
 
+import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -25,9 +26,24 @@ from pathlib import Path
 from typing import Optional
 
 
+# DB_PATH is overridable via the EVAL_HISTORY_DB_PATH environment variable.
+# Real usage (uvicorn app.main:app) never sets this, so it resolves to the
+# same backend/evaluation_history.db path as always -- zero behavior
+# change for the running application.
+#
+# conftest.py sets this env var to an isolated temp file before any app
+# module is imported, so the test suite (which boots the real app via
+# FastAPI's TestClient in test_e2e_integration.py) can never again write
+# test fixture data into the real database. This overridability was added
+# specifically because it wasn't there before: running `pytest` used to
+# silently inject system names like "BatchTestSystem" and
+# "IntegrationTestSystem" into the live Dashboard's real evaluation
+# history, which is a serious testing-hygiene defect, not a cosmetic one.
+_env_path = os.environ.get("EVAL_HISTORY_DB_PATH")
 DB_PATH = (
-    Path(__file__).resolve().parent.parent.parent
-    / "evaluation_history.db"
+    Path(_env_path)
+    if _env_path
+    else Path(__file__).resolve().parent.parent.parent / "evaluation_history.db"
 )
 
 
@@ -305,35 +321,115 @@ def record_evaluation(
 
 
 # --------------------------------------------------------------------
-# Read-side queries
+# Shared filter builder
 # --------------------------------------------------------------------
+# Every read-side query below accepts the same optional filters (system,
+# evaluation mode, dataset, date range) and builds its WHERE clause
+# through this one helper, so filtering behaves identically everywhere
+# and isn't reimplemented per-query.
+#
+# "Dataset" filters on batch_label -- there is no dedicated dataset
+# column in the schema today; batch_label (e.g. "Trivia set v1") is the
+# closest existing concept. A true dataset_name field, distinct from a
+# free-text run label, would be a schema addition if that distinction
+# ever needs to be stricter than it is now.
+
+def _build_filters(
+    system_name: Optional[str] = None,
+    mode: Optional[str] = None,
+    dataset: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+) -> tuple[str, list]:
+    clauses = []
+    params: list = []
+
+    if system_name:
+        clauses.append("system_name = ?")
+        params.append(system_name)
+
+    if mode:
+        clauses.append("mode = ?")
+        params.append(mode)
+
+    if dataset:
+        clauses.append("batch_label = ?")
+        params.append(dataset)
+
+    if date_from:
+        # created_at is an ISO timestamp; a date-only lower bound
+        # correctly includes the entire day via string comparison.
+        clauses.append("created_at >= ?")
+        params.append(date_from)
+
+    if date_to:
+        # Append time-of-day so the upper bound includes the whole day,
+        # not just 00:00:00 of that date.
+        clauses.append("created_at <= ?")
+        params.append(f"{date_to}T23:59:59.999999")
+
+    where = (" AND " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+def get_filter_options() -> dict:
+    """
+    Distinct values for populating the Dashboard's filter dropdowns --
+    every system name, dataset/batch label, and mode ever recorded, plus
+    the earliest/latest evaluation timestamps for a sensible default date
+    range.
+    """
+    with _connect() as conn:
+        systems = [
+            r["system_name"] for r in conn.execute(
+                "SELECT DISTINCT system_name FROM evaluation_records ORDER BY system_name"
+            ).fetchall()
+        ]
+        datasets = [
+            r["batch_label"] for r in conn.execute(
+                "SELECT DISTINCT batch_label FROM evaluation_records "
+                "WHERE batch_label IS NOT NULL AND batch_label != '' ORDER BY batch_label"
+            ).fetchall()
+        ]
+        modes = [
+            r["mode"] for r in conn.execute(
+                "SELECT DISTINCT mode FROM evaluation_records ORDER BY mode"
+            ).fetchall()
+        ]
+        bounds = conn.execute(
+            "SELECT MIN(created_at) AS earliest, MAX(created_at) AS latest FROM evaluation_records"
+        ).fetchone()
+
+        return {
+            "systems": systems,
+            "datasets": datasets,
+            "modes": modes,
+            "earliest": bounds["earliest"] if bounds else None,
+            "latest": bounds["latest"] if bounds else None,
+        }
+
 
 def get_runs(
     system_name: Optional[str] = None,
     batch_id: Optional[str] = None,
     mode: Optional[str] = None,
+    dataset: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     limit: int = 500,
 ) -> list[dict]:
 
-    query = """
+    where, params = _build_filters(system_name, mode, dataset, date_from, date_to)
+
+    query = f"""
         SELECT *
         FROM evaluation_records
-        WHERE 1=1
+        WHERE 1=1 {where}
     """
-
-    params: list = []
-
-    if system_name:
-        query += " AND system_name = ?"
-        params.append(system_name)
 
     if batch_id:
         query += " AND batch_id = ?"
         params.append(batch_id)
-
-    if mode:
-        query += " AND mode = ?"
-        params.append(mode)
 
     query += """
         ORDER BY created_at DESC
@@ -355,18 +451,32 @@ def get_runs(
         ]
 
 
-def get_overall_summary() -> dict:
+def get_overall_summary(
+    system_name: Optional[str] = None,
+    mode: Optional[str] = None,
+    dataset: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+) -> dict:
     """
-    Return overall evaluation statistics.
+    Return overall evaluation statistics, optionally filtered by system,
+    evaluation mode, dataset (batch_label), and/or a date range.
 
-    high_hallucination_count is retained for backward compatibility.
-    The new claim-level hallucination metrics are also aggregated.
+    high_hallucination_count and total_pass/total_fail are retained for
+    backward compatibility (binary quality-gate view). pass_count /
+    needs_improvement_count / fail_count is the three-way breakdown by
+    final_verdict:
+        Pass              -> EXCELLENT, GOOD
+        Needs Improvement -> NEEDS IMPROVEMENT, POOR
+        Fail              -> FAIL (quality gate failed)
     """
+
+    where, params = _build_filters(system_name, mode, dataset, date_from, date_to)
 
     with _connect() as conn:
 
         row = conn.execute(
-            """
+            f"""
             SELECT
                 COUNT(*) AS total_evaluations,
 
@@ -398,6 +508,30 @@ def get_overall_summary() -> dict:
 
                 SUM(
                     CASE
+                        WHEN final_verdict IN ('EXCELLENT', 'GOOD')
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS pass_count,
+
+                SUM(
+                    CASE
+                        WHEN final_verdict IN ('NEEDS IMPROVEMENT', 'POOR')
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS needs_improvement_count,
+
+                SUM(
+                    CASE
+                        WHEN final_verdict = 'FAIL'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS fail_count,
+
+                SUM(
+                    CASE
                         WHEN hallucination_score < 4
                         THEN 1
                         ELSE 0
@@ -421,23 +555,33 @@ def get_overall_summary() -> dict:
                 ) AS avg_hallucination_rate
 
             FROM evaluation_records
-            """
+            WHERE 1=1 {where}
+            """,
+            params,
         ).fetchone()
 
         return dict(row) if row else {}
 
 
 def get_batch_summaries(
+    system_name: Optional[str] = None,
+    dataset: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     limit: int = 100
 ) -> list[dict]:
     """
-    Return one row per distinct batch run.
+    Return one row per distinct batch run, optionally filtered by system,
+    dataset (batch_label), and/or a date range. Mode is not a filter
+    parameter here since this query already restricts to mode = 'batch'.
     """
+
+    where, params = _build_filters(system_name, None, dataset, date_from, date_to)
 
     with _connect() as conn:
 
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 batch_id,
 
@@ -494,13 +638,38 @@ def get_batch_summaries(
                         THEN 1
                         ELSE 0
                     END
-                ) AS fail_count
+                ) AS fail_count,
+
+                SUM(
+                    CASE
+                        WHEN final_verdict IN ('EXCELLENT', 'GOOD')
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS pass_verdict_count,
+
+                SUM(
+                    CASE
+                        WHEN final_verdict IN ('NEEDS IMPROVEMENT', 'POOR')
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS needs_improvement_count,
+
+                SUM(
+                    CASE
+                        WHEN final_verdict = 'FAIL'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS fail_verdict_count
 
             FROM evaluation_records
 
             WHERE
                 mode = 'batch'
                 AND batch_id IS NOT NULL
+                {where}
 
             GROUP BY batch_id
 
@@ -508,7 +677,7 @@ def get_batch_summaries(
 
             LIMIT ?
             """,
-            (limit,),
+            [*params, limit],
         ).fetchall()
 
         return [
@@ -517,15 +686,26 @@ def get_batch_summaries(
         ]
 
 
-def get_system_summaries() -> list[dict]:
+def get_system_summaries(
+    mode: Optional[str] = None,
+    dataset: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+) -> list[dict]:
     """
-    Return one row per distinct AI system.
+    Return one row per distinct AI system, optionally filtered by
+    evaluation mode, dataset (batch_label), and/or a date range.
+    system_name itself is not a filter parameter here -- filtering by the
+    exact dimension being grouped on would defeat the comparison this
+    query exists to support.
     """
+
+    where, params = _build_filters(None, mode, dataset, date_from, date_to)
 
     with _connect() as conn:
 
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 system_name,
 
@@ -576,11 +756,13 @@ def get_system_summaries() -> list[dict]:
                 ) AS fail_count
 
             FROM evaluation_records
+            WHERE 1=1 {where}
 
             GROUP BY system_name
 
             ORDER BY total_evaluations DESC
-            """
+            """,
+            params,
         ).fetchall()
 
         return [

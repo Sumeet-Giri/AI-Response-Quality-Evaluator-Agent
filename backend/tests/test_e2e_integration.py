@@ -193,6 +193,75 @@ def test_history_summary_reflects_recorded_evaluations(client):
 
 
 # --------------------------------------------------------------------
+# Dashboard filtering and the 3-way Pass/Needs Improvement/Fail breakdown
+# --------------------------------------------------------------------
+
+def test_three_way_verdict_breakdown_sums_to_total(client):
+    client.post("/evaluate/all", json={
+        "question": "What is the capital of France?", "response": "Paris is the capital of France.",
+        "reference_answer": "Paris is the capital of France.", "system_name": "BreakdownTestSystem",
+    })
+    client.post("/evaluate/all", json={
+        "question": "what is capital of india", "response": "New Delhi is the capital of India.",
+        "reference_answer": "", "system_name": "BreakdownTestSystem",
+    })
+    summary = client.get("/history/summary", params={"system_name": "BreakdownTestSystem"}).json()
+    assert summary["pass_count"] + summary["needs_improvement_count"] + summary["fail_count"] == summary["total_evaluations"]
+    assert summary["pass_count"] >= 1
+    assert summary["fail_count"] >= 1
+
+
+def test_summary_filter_by_system_name_narrows_results(client):
+    client.post("/evaluate/all", json={
+        "question": "Q1", "response": "A1", "reference_answer": "A1", "system_name": "FilterTestSystemA",
+    })
+    client.post("/evaluate/all", json={
+        "question": "Q2", "response": "A2", "reference_answer": "A2", "system_name": "FilterTestSystemB",
+    })
+    filtered = client.get("/history/summary", params={"system_name": "FilterTestSystemA"}).json()
+    assert filtered["total_evaluations"] == 1
+
+
+def test_summary_filter_by_dataset_narrows_results(client):
+    batch_id = "filter-test-batch"
+    client.post("/evaluate/all", json={
+        "question": "Q1", "response": "A1", "reference_answer": "A1",
+        "batch_id": batch_id, "batch_label": "FilterTestDataset",
+    })
+    filtered = client.get("/history/summary", params={"dataset": "FilterTestDataset"}).json()
+    assert filtered["total_evaluations"] >= 1
+
+
+def test_summary_filter_by_mode_narrows_results(client):
+    single_before = client.get("/history/summary", params={"mode": "single"}).json()["total_evaluations"] or 0
+    client.post("/evaluate/all", json={"question": "Q", "response": "A", "reference_answer": "A"})
+    single_after = client.get("/history/summary", params={"mode": "single"}).json()["total_evaluations"]
+    assert single_after == single_before + 1
+
+
+def test_summary_filter_by_future_date_returns_zero(client):
+    result = client.get("/history/summary", params={"date_from": "2099-01-01"}).json()
+    assert (result.get("total_evaluations") or 0) == 0
+
+
+def test_filter_options_returns_distinct_values(client):
+    client.post("/evaluate/all", json={
+        "question": "Q", "response": "A", "reference_answer": "A", "system_name": "FilterOptionsTestSystem",
+    })
+    options = client.get("/history/filter-options").json()
+    assert "FilterOptionsTestSystem" in options["systems"]
+    assert "systems" in options and "datasets" in options and "modes" in options
+    assert "earliest" in options and "latest" in options
+
+
+def test_batches_and_systems_endpoints_accept_filters_without_error(client):
+    r1 = client.get("/history/batches", params={"system_name": "GPT-4", "dataset": "anything"})
+    assert r1.status_code == 200
+    r2 = client.get("/history/systems", params={"mode": "batch"})
+    assert r2.status_code == 200
+
+
+# --------------------------------------------------------------------
 # Validation endpoints (benchmark cases)
 # --------------------------------------------------------------------
 
