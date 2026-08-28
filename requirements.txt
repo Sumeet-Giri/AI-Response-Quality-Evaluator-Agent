@@ -20,4 +20,3 @@ datasets
 
 numpy
 
-pytest
